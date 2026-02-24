@@ -22,7 +22,7 @@ import { CONTAINER_RUNTIME_BIN, readonlyMountArgs, stopContainer } from './conta
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
 import { getTurnkeyConfig, getSecretsViaTurnkey } from './turnkey.js';
-import { logCredentialEvent } from './db.js';
+import { logCredentialEvent, getTurnkeyGroupMeta } from './db.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -37,6 +37,10 @@ export interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   secrets?: Record<string, string>;
+  /** Ethereum wallet address from the group's Turnkey sub-org, if provisioned */
+  walletAddress?: string;
+  /** Turnkey sub-org ID scoped to this group, for IPC-based signing requests */
+  turnkeySubOrgId?: string;
 }
 
 export interface ContainerOutput {
@@ -275,6 +279,15 @@ export async function runContainerAgent(
   // Fetch secrets before spawning so we can await the async Turnkey call.
   // Secrets are still passed via stdin only — never written to disk.
   const secrets = await readSecrets(group.folder);
+
+  // Attach Turnkey sub-org metadata if provisioned for this group.
+  // walletAddress lets the agent display/receive funds; turnkeySubOrgId
+  // lets it request transaction signing via IPC back through the orchestrator.
+  const turnkeyMeta = getTurnkeyGroupMeta(group.folder);
+  if (turnkeyMeta) {
+    input.walletAddress = turnkeyMeta.walletAddress;
+    input.turnkeySubOrgId = turnkeyMeta.subOrgId;
+  }
 
   return new Promise((resolve) => {
     const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {

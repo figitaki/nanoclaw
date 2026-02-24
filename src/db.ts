@@ -129,6 +129,18 @@ function createSchema(database: Database.Database): void {
   } catch {
     /* columns already exist */
   }
+
+  // Add Turnkey sub-org columns to registered_groups (migration for existing DBs)
+  try {
+    database.exec(
+      `ALTER TABLE registered_groups ADD COLUMN turnkey_sub_org_id TEXT`,
+    );
+    database.exec(
+      `ALTER TABLE registered_groups ADD COLUMN turnkey_wallet_address TEXT`,
+    );
+  } catch {
+    /* columns already exist */
+  }
 }
 
 export function initDatabase(): void {
@@ -610,6 +622,44 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     };
   }
   return result;
+}
+
+// --- Turnkey sub-org / wallet metadata ---
+
+export interface TurnkeyGroupMeta {
+  subOrgId: string;
+  walletAddress: string;
+}
+
+/**
+ * Retrieve the Turnkey sub-org ID and wallet address for a group, if provisioned.
+ */
+export function getTurnkeyGroupMeta(groupFolder: string): TurnkeyGroupMeta | undefined {
+  const row = db
+    .prepare(
+      `SELECT turnkey_sub_org_id, turnkey_wallet_address
+       FROM registered_groups WHERE folder = ?`,
+    )
+    .get(groupFolder) as
+    | { turnkey_sub_org_id: string | null; turnkey_wallet_address: string | null }
+    | undefined;
+  if (!row || !row.turnkey_sub_org_id || !row.turnkey_wallet_address) return undefined;
+  return { subOrgId: row.turnkey_sub_org_id, walletAddress: row.turnkey_wallet_address };
+}
+
+/**
+ * Persist the Turnkey sub-org ID and wallet address for a group.
+ * Called once after provisionGroupSubOrg() completes successfully.
+ */
+export function setTurnkeyGroupMeta(
+  groupFolder: string,
+  meta: TurnkeyGroupMeta,
+): void {
+  db.prepare(
+    `UPDATE registered_groups
+     SET turnkey_sub_org_id = ?, turnkey_wallet_address = ?
+     WHERE folder = ?`,
+  ).run(meta.subOrgId, meta.walletAddress, groupFolder);
 }
 
 // --- Credential audit log ---
