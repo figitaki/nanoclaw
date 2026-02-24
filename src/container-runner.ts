@@ -21,6 +21,8 @@ import { logger } from './logger.js';
 import { CONTAINER_RUNTIME_BIN, readonlyMountArgs, stopContainer } from './container-runtime.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
+import { getTurnkeyConfig, getSecretsViaTurnkey } from './turnkey.js';
+import { logCredentialEvent } from './db.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -179,10 +181,23 @@ function buildVolumeMounts(
 }
 
 /**
- * Read allowed secrets from .env for passing to the container via stdin.
- * Secrets are never written to disk or mounted as files.
+ * Retrieve agent secrets for passing to the container via stdin.
+ *
+ * When Turnkey is configured, secrets are fetched through the Turnkey credential
+ * manager: the call authenticates with Turnkey's API (creating an immutable audit
+ * record), returns credentials from an in-memory cache subject to a configurable
+ * TTL, and logs the issuance event to the local SQLite audit log.
+ *
+ * When Turnkey is not configured, falls back to reading directly from .env.
+ *
+ * In both cases secrets are never written to disk or mounted as files — they are
+ * passed to the container exclusively via stdin.
  */
-function readSecrets(): Record<string, string> {
+async function readSecrets(groupFolder: string): Promise<Record<string, string>> {
+  const turnkeyConfig = getTurnkeyConfig();
+  if (turnkeyConfig) {
+    return getSecretsViaTurnkey(groupFolder, turnkeyConfig, logCredentialEvent);
+  }
   return readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
 }
 
@@ -257,6 +272,10 @@ export async function runContainerAgent(
   const logsDir = path.join(groupDir, 'logs');
   fs.mkdirSync(logsDir, { recursive: true });
 
+  // Fetch secrets before spawning so we can await the async Turnkey call.
+  // Secrets are still passed via stdin only — never written to disk.
+  const secrets = await readSecrets(group.folder);
+
   return new Promise((resolve) => {
     const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -270,7 +289,7 @@ export async function runContainerAgent(
     let stderrTruncated = false;
 
     // Pass secrets via stdin (never written to disk or mounted as files)
-    input.secrets = readSecrets();
+    input.secrets = secrets;
     container.stdin.write(JSON.stringify(input));
     container.stdin.end();
     // Remove secrets from input so they don't appear in logs
