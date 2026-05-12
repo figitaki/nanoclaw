@@ -23,6 +23,7 @@ import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
 import { getTurnkeyConfig, getSecretsViaTurnkey } from './turnkey.js';
 import { logCredentialEvent, getTurnkeyGroupMeta } from './db.js';
+import { getOrStartCredentialProxy } from './credential-proxy.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -185,28 +186,60 @@ function buildVolumeMounts(
 }
 
 /**
- * Retrieve agent secrets for passing to the container via stdin.
+ * Retrieve agent secrets for the container.
  *
- * When Turnkey is configured, secrets are fetched through the Turnkey credential
- * manager: the call authenticates with Turnkey's API (creating an immutable audit
- * record), returns credentials from an in-memory cache subject to a configurable
- * TTL, and logs the issuance event to the local SQLite audit log.
+ * Turnkey configured → proxy mode (strongest isolation):
+ *   Starts a local HTTP proxy on 127.0.0.1. The container receives a short-lived
+ *   session token as ANTHROPIC_API_KEY and points ANTHROPIC_BASE_URL at the
+ *   proxy. All Anthropic API traffic is intercepted; the proxy validates the
+ *   session token, fetches the real key from Turnkey (cached for TTL), injects
+ *   it, and forwards to api.anthropic.com. The real key never enters the
+ *   container's address space.
  *
- * When Turnkey is not configured, falls back to reading directly from .env.
+ * No Turnkey → read from .env and pass via stdin (legacy behaviour).
  *
- * In both cases secrets are never written to disk or mounted as files — they are
- * passed to the container exclusively via stdin.
+ * In all cases secrets are never written to disk or mounted as files.
  */
-async function readSecrets(groupFolder: string): Promise<Record<string, string>> {
+async function readSecrets(
+  groupFolder: string,
+): Promise<{ secrets: Record<string, string>; proxySessionToken?: string }> {
   const turnkeyConfig = getTurnkeyConfig();
   if (turnkeyConfig) {
-    return getSecretsViaTurnkey(groupFolder, turnkeyConfig, logCredentialEvent);
+    const proxy = await getOrStartCredentialProxy();
+    const sessionToken = proxy.registerSession(groupFolder, turnkeyConfig.tokenTtlMs);
+    // Log the issuance event just like the old getSecretsViaTurnkey path
+    logCredentialEvent({
+      groupFolder,
+      eventType: 'token_issued',
+      ttlMs: turnkeyConfig.tokenTtlMs,
+      issuedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + turnkeyConfig.tokenTtlMs).toISOString(),
+      turnkeyValidated: true,
+    });
+    return {
+      secrets: {
+        // Session token stands in for the real key — proxy swaps it at the wire
+        ANTHROPIC_API_KEY: sessionToken,
+        ANTHROPIC_BASE_URL: `http://host.docker.internal:${proxy.port}`,
+      },
+      proxySessionToken: sessionToken,
+    };
   }
-  return readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
+  const secrets = await readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
+  return { secrets };
 }
 
-function buildContainerArgs(mounts: VolumeMount[], containerName: string): string[] {
+function buildContainerArgs(
+  mounts: VolumeMount[],
+  containerName: string,
+  opts?: { addHostGateway?: boolean },
+): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
+
+  // On Linux, host.docker.internal isn't built-in (unlike macOS/Windows Desktop)
+  if (opts?.addHostGateway && process.platform === 'linux') {
+    args.push('--add-host', 'host.docker.internal:host-gateway');
+  }
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
@@ -248,7 +281,14 @@ export async function runContainerAgent(
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(mounts, containerName);
+
+  // Fetch secrets before building args so we know whether proxy mode is active
+  const { secrets, proxySessionToken } = await readSecrets(group.folder);
+
+  const containerArgs = buildContainerArgs(mounts, containerName, {
+    // proxy runs on host; need host.docker.internal to resolve on Linux
+    addHostGateway: proxySessionToken !== undefined,
+  });
 
   logger.debug(
     {
@@ -275,10 +315,6 @@ export async function runContainerAgent(
 
   const logsDir = path.join(groupDir, 'logs');
   fs.mkdirSync(logsDir, { recursive: true });
-
-  // Fetch secrets before spawning so we can await the async Turnkey call.
-  // Secrets are still passed via stdin only — never written to disk.
-  const secrets = await readSecrets(group.folder);
 
   // Attach Turnkey sub-org metadata if provisioned for this group.
   // walletAddress lets the agent display/receive funds; turnkeySubOrgId
@@ -415,6 +451,12 @@ export async function runContainerAgent(
 
     container.on('close', (code) => {
       clearTimeout(timeout);
+      // Revoke the proxy session immediately so the token can't be reused
+      if (proxySessionToken) {
+        getOrStartCredentialProxy()
+          .then((proxy) => proxy.revokeSession(proxySessionToken))
+          .catch(() => {}); // non-fatal
+      }
       const duration = Date.now() - startTime;
 
       if (timedOut) {
@@ -606,6 +648,11 @@ export async function runContainerAgent(
 
     container.on('error', (err) => {
       clearTimeout(timeout);
+      if (proxySessionToken) {
+        getOrStartCredentialProxy()
+          .then((proxy) => proxy.revokeSession(proxySessionToken))
+          .catch(() => {});
+      }
       logger.error({ group: group.name, containerName, error: err }, 'Container spawn error');
       resolve({
         status: 'error',
