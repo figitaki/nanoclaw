@@ -1,0 +1,24 @@
+{
+  "name": "nanoclaw-tvc-proxy",
+  "version": "1.0.0",
+  "description": "Turnkey Verifiable Cloud credential proxy — injects Anthropic API keys at the network layer inside a Nitro Enclave",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild index.ts --bundle --platform=node --target=node22 --format=cjs --outfile=proxy.cjs --external:crypto",
+    "start": "node proxy.cjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@turnkey/crypto": "^2.3.3",
+    "@turnkey/sdk-server": "^5.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

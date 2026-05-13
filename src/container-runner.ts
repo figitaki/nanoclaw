@@ -202,12 +202,12 @@ function buildVolumeMounts(
  */
 async function readSecrets(
   groupFolder: string,
-): Promise<{ secrets: Record<string, string>; proxySessionToken?: string }> {
+): Promise<{ secrets: Record<string, string>; proxySessionToken?: string; proxyIsLocal?: boolean }> {
   const turnkeyConfig = getTurnkeyConfig();
   if (turnkeyConfig) {
     const proxy = await getOrStartCredentialProxy();
-    const sessionToken = proxy.registerSession(groupFolder, turnkeyConfig.tokenTtlMs);
-    // Log the issuance event just like the old getSecretsViaTurnkey path
+    // registerSession is now async (remote TVC proxy requires an HTTP call)
+    const sessionToken = await proxy.registerSession(groupFolder, turnkeyConfig.tokenTtlMs);
     logCredentialEvent({
       groupFolder,
       eventType: 'token_issued',
@@ -218,11 +218,12 @@ async function readSecrets(
     });
     return {
       secrets: {
-        // Session token stands in for the real key — proxy swaps it at the wire
         ANTHROPIC_API_KEY: sessionToken,
-        ANTHROPIC_BASE_URL: `http://host.docker.internal:${proxy.port}`,
+        ANTHROPIC_BASE_URL: proxy.baseUrl,
       },
       proxySessionToken: sessionToken,
+      // Local proxy uses host.docker.internal and needs --add-host on Linux
+      proxyIsLocal: proxy.port > 0,
     };
   }
   const secrets = await readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
@@ -282,12 +283,13 @@ export async function runContainerAgent(
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
 
-  // Fetch secrets before building args so we know whether proxy mode is active
-  const { secrets, proxySessionToken } = await readSecrets(group.folder);
+  // Fetch secrets before building args so we know which proxy mode is active
+  const { secrets, proxySessionToken, proxyIsLocal } = await readSecrets(group.folder);
 
   const containerArgs = buildContainerArgs(mounts, containerName, {
-    // proxy runs on host; need host.docker.internal to resolve on Linux
-    addHostGateway: proxySessionToken !== undefined,
+    // Local proxy binds on host; --add-host makes host.docker.internal resolve on Linux.
+    // TVC proxy is a public HTTPS URL — no docker networking tweak needed.
+    addHostGateway: proxyIsLocal === true,
   });
 
   logger.debug(

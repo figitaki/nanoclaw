@@ -1,0 +1,27 @@
+{
+  "_comment": [
+    "Deployment config. Run: tvc deploy create tvc-deploy.json",
+    "Then approve: tvc deploy approve --deploy-id <UUID> --operator-id <UUID>",
+    "",
+    "pivotPath / pivotArgs: what TVC boots inside the enclave.",
+    "expectedPivotDigest: sha256 of /usr/local/bin/node in the image.",
+    "  Compute with: scripts/build-and-digest.sh <image-url>",
+    "",
+    "The image @sha256 pin is the primary code-integrity guarantee —",
+    "the container image digest commits to proxy.cjs (and therefore all",
+    "application logic). The pivot digest additionally pins the Node version.",
+    "",
+    "Environment variables are baked into the container image for vault mode.",
+    "ADMIN_TOKEN and ANTHROPIC_API_KEY should be passed via a private registry",
+    "image that is not publicly accessible (use pivotContainerEncryptedPullSecret)."
+  ],
+  "appId": "<app-UUID-from-tvc-app-create>",
+  "pivotContainerImageUrl": "your-registry/nanoclaw-tvc-proxy:latest@sha256:<image-digest>",
+  "pivotPath": "/usr/local/bin/node",
+  "pivotArgs": "/app/proxy.cjs",
+  "expectedPivotDigest": "<sha256-of-node-binary-from-build-and-digest-sh>",
+  "pivotContainerEncryptedPullSecret": null,
+  "publicIngressPort": 443,
+  "healthCheckPort": 3000,
+  "healthCheckType": "TVC_HEALTH_CHECK_TYPE_HTTP"
+}

@@ -1,0 +1,22 @@
+{
+  "_comment": [
+    "One-time app creation. Run: tvc app create tvc-app.json",
+    "Replace <your-operator-public-key> with the key from: tvc login",
+    "Set externalConnectivity=true so containers can reach this app."
+  ],
+  "name": "nanoclaw-credential-proxy",
+  "quorumPublicKey": null,
+  "externalConnectivity": true,
+  "manifestSetId": null,
+  "manifestSetParams": {
+    "name": "nanoclaw-operators",
+    "threshold": 1,
+    "newOperators": [
+      {
+        "name": "operator-1",
+        "publicKey": "<your-operator-public-key>"
+      }
+    ],
+    "existingOperatorIds": []
+  }
+}
