@@ -24,10 +24,12 @@ import {
   getMessagesSince,
   getNewMessages,
   getRouterState,
+  getTurnkeyGroupMeta,
   initDatabase,
   setRegisteredGroup,
   setRouterState,
   setSession,
+  setTurnkeyGroupMeta,
   storeChatMetadata,
   storeMessage,
 } from './db.js';
@@ -38,6 +40,7 @@ import { findChannel, formatMessages, formatOutbound } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
+import { getTurnkeyConfig, provisionGroupSubOrg } from './turnkey.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -99,6 +102,31 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
     { jid, name: group.name, folder: group.folder },
     'Group registered',
   );
+
+  // Provision a Turnkey sub-org + HD wallet for this group if Turnkey is enabled
+  // and the sub-org hasn't been created yet. Runs in the background; a failure
+  // only means wallet features are unavailable for this group — it doesn't block
+  // message processing.
+  const turnkeyConfig = getTurnkeyConfig();
+  if (turnkeyConfig && !getTurnkeyGroupMeta(group.folder)) {
+    provisionGroupSubOrg(group.folder, group.name, turnkeyConfig)
+      .then((result) => {
+        setTurnkeyGroupMeta(group.folder, {
+          subOrgId: result.subOrgId,
+          walletAddress: result.walletAddress,
+        });
+        logger.info(
+          { folder: group.folder, walletAddress: result.walletAddress },
+          'Turnkey sub-org persisted for group',
+        );
+      })
+      .catch((err) => {
+        logger.warn(
+          { folder: group.folder, err },
+          'Turnkey sub-org provisioning failed (non-fatal)',
+        );
+      });
+  }
 }
 
 /**

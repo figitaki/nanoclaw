@@ -6,6 +6,7 @@ import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { NewMessage, RegisteredGroup, ScheduledTask, TaskRunLog } from './types.js';
+import type { CredentialEvent } from './turnkey.js';
 
 let db: Database.Database;
 
@@ -77,6 +78,17 @@ function createSchema(database: Database.Database): void {
       container_config TEXT,
       requires_trigger INTEGER DEFAULT 1
     );
+
+    CREATE TABLE IF NOT EXISTS credential_audit_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_folder TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      ttl_ms INTEGER NOT NULL,
+      issued_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      turnkey_validated INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_credential_audit_group ON credential_audit_log(group_folder, issued_at);
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -114,6 +126,18 @@ function createSchema(database: Database.Database): void {
     database.exec(`UPDATE chats SET channel = 'whatsapp', is_group = 0 WHERE jid LIKE '%@s.whatsapp.net'`);
     database.exec(`UPDATE chats SET channel = 'discord', is_group = 1 WHERE jid LIKE 'dc:%'`);
     database.exec(`UPDATE chats SET channel = 'telegram', is_group = 1 WHERE jid LIKE 'tg:%'`);
+  } catch {
+    /* columns already exist */
+  }
+
+  // Add Turnkey sub-org columns to registered_groups (migration for existing DBs)
+  try {
+    database.exec(
+      `ALTER TABLE registered_groups ADD COLUMN turnkey_sub_org_id TEXT`,
+    );
+    database.exec(
+      `ALTER TABLE registered_groups ADD COLUMN turnkey_wallet_address TEXT`,
+    );
   } catch {
     /* columns already exist */
   }
@@ -598,6 +622,93 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     };
   }
   return result;
+}
+
+// --- Turnkey sub-org / wallet metadata ---
+
+export interface TurnkeyGroupMeta {
+  subOrgId: string;
+  walletAddress: string;
+}
+
+/**
+ * Retrieve the Turnkey sub-org ID and wallet address for a group, if provisioned.
+ */
+export function getTurnkeyGroupMeta(groupFolder: string): TurnkeyGroupMeta | undefined {
+  const row = db
+    .prepare(
+      `SELECT turnkey_sub_org_id, turnkey_wallet_address
+       FROM registered_groups WHERE folder = ?`,
+    )
+    .get(groupFolder) as
+    | { turnkey_sub_org_id: string | null; turnkey_wallet_address: string | null }
+    | undefined;
+  if (!row || !row.turnkey_sub_org_id || !row.turnkey_wallet_address) return undefined;
+  return { subOrgId: row.turnkey_sub_org_id, walletAddress: row.turnkey_wallet_address };
+}
+
+/**
+ * Persist the Turnkey sub-org ID and wallet address for a group.
+ * Called once after provisionGroupSubOrg() completes successfully.
+ */
+export function setTurnkeyGroupMeta(
+  groupFolder: string,
+  meta: TurnkeyGroupMeta,
+): void {
+  db.prepare(
+    `UPDATE registered_groups
+     SET turnkey_sub_org_id = ?, turnkey_wallet_address = ?
+     WHERE folder = ?`,
+  ).run(meta.subOrgId, meta.walletAddress, groupFolder);
+}
+
+// --- Credential audit log ---
+
+/**
+ * Record a Turnkey credential issuance/revocation event for per-group compliance tracking.
+ */
+export function logCredentialEvent(event: CredentialEvent): void {
+  db.prepare(
+    `INSERT INTO credential_audit_log (group_folder, event_type, ttl_ms, issued_at, expires_at, turnkey_validated)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(
+    event.groupFolder,
+    event.eventType,
+    event.ttlMs,
+    event.issuedAt,
+    event.expiresAt,
+    event.turnkeyValidated ? 1 : 0,
+  );
+}
+
+export interface CredentialAuditEntry {
+  id: number;
+  group_folder: string;
+  event_type: string;
+  ttl_ms: number;
+  issued_at: string;
+  expires_at: string;
+  turnkey_validated: number;
+}
+
+/**
+ * Retrieve the credential audit log for a group, ordered newest-first.
+ * Returns all groups if groupFolder is omitted.
+ */
+export function getCredentialAuditLog(groupFolder?: string, limit = 100): CredentialAuditEntry[] {
+  if (groupFolder) {
+    return db
+      .prepare(
+        `SELECT * FROM credential_audit_log WHERE group_folder = ?
+         ORDER BY issued_at DESC LIMIT ?`,
+      )
+      .all(groupFolder, limit) as CredentialAuditEntry[];
+  }
+  return db
+    .prepare(
+      `SELECT * FROM credential_audit_log ORDER BY issued_at DESC LIMIT ?`,
+    )
+    .all(limit) as CredentialAuditEntry[];
 }
 
 // --- JSON migration ---
